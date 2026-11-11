@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Game Night</title>
+<style>
+  :root { --bg:#14102b; --card:#211a45; --card2:#2b2358; --ink:#fff7e6; --mute:#a99fd6; --gold:#ffc83d; --pink:#ff5c8a; --green:#4ade80; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:radial-gradient(1200px 600px at 50% -10%, #3a2a80 0%, var(--bg) 60%); color:var(--ink); font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; min-height:100vh; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  main { max-width:520px; margin:0 auto; padding:16px; }
+  h1 { font-size:28px; margin:8px 0 2px; letter-spacing:-.5px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:1.2px; color:var(--mute); margin:22px 0 8px; font-weight:700; }
+  .sub { color:var(--mute); margin:0 0 12px; }
+  .card { background:var(--card); border-radius:16px; padding:16px; margin-bottom:12px; }
+  input, select { width:100%; padding:14px; font-size:17px; border-radius:12px; border:2px solid #3b3270; background:#150f33; color:var(--ink); outline:none; margin:6px 0; }
+  input:focus, select:focus { border-color:var(--gold); }
+  button { width:100%; padding:14px; font-size:17px; font-weight:700; border:0; border-radius:12px; background:var(--gold); color:#2a1d00; margin:6px 0; cursor:pointer; }
+  button.alt { background:var(--card2); color:var(--ink); }
+  button.pink { background:var(--pink); color:#fff; }
+  button.sm { width:auto; padding:8px 12px; font-size:14px; margin:0; }
+  button:disabled { opacity:.4; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:1; }
+  .pill { display:inline-block; padding:3px 10px; border-radius:99px; font-size:12px; font-weight:700; background:var(--card2); color:var(--gold); }
+  .lb { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #342b66; }
+  .lb:last-child { border:0; }
+  .rank { width:26px; text-align:center; font-weight:800; color:var(--mute); }
+  .lb:nth-child(1) .rank { color:var(--gold); }
+  .nm { flex:1; font-weight:600; }
+  .pts { font-weight:800; font-variant-numeric:tabular-nums; }
+  .tick { color:var(--green); font-weight:700; }
+  .big { font-size:42px; font-weight:800; text-align:center; padding:28px 8px; word-break:break-word; line-height:1.1; }
+  .center { text-align:center; }
+  .log { font-size:14px; color:var(--mute); padding:4px 0; }
+  .err { color:var(--pink); min-height:20px; font-size:14px; }
+  .top { display:flex; justify-content:space-between; align-items:center; }
+  a { color:var(--gold); }
+  .tabs { display:flex; gap:6px; margin:10px 0; }
+  .tabs button { background:var(--card2); color:var(--mute); padding:10px; font-size:14px; margin:0; }
+  .tabs button.on { background:var(--gold); color:#2a1d00; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+
+<script src="config.js"></script>
+<script>
+// ---- Setup: paste your Firebase Realtime Database URL in config.js ----
+const CONFIG = window.CONFIG || { DB_URL: '', GM_PIN: '1234' };
+const DB = CONFIG.DB_URL.replace(/\/$/, '') + '/gamenight';
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clean = (s, n) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+const rid = () => Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-3);
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} },
+  del: (k) => { try { localStorage.removeItem(k); } catch (e) {} },
+};
+
+let me = { id: store.get('pid'), name: store.get('pname') };
+let pin = store.get('gmpin');
+let isGM = !!pin && pin === CONFIG.GM_PIN && location.search.includes('gm');
+let tab = 'play';
+let S = null, R = null;
+let current = null;
+let asking = false;
+let typing = false;
+
+async function fb(path, method, body) {
+  const r = await fetch(`${DB}/${path}.json`, { method: method || 'GET', body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!r.ok) throw new Error('Connection problem');
+  return r.json();
+}
+const emp = () => (R && R.empire) || { status: 'idle', prize: 10 };
+const addLog = (text) => fb('log/' + rid(), 'PUT', { t: Date.now(), text });
+
+const api = {
+  async join(name) {
+    name = clean(name, 24);
+    if (!name) throw new Error('Name needed');
+    const list = (R && R.players) || (await fb('players')) || {};
+    const ex = Object.entries(list).find(([, p]) => p.name.toLowerCase() === name.toLowerCase());
+    if (ex) return { id: ex[0], name: ex[1].name };
+    const id = rid();
+    await fb('players/' + id, 'PUT', { name, points: 0 });
+    addLog(name + ' checked in');
+    return { id, name };
+  },
+  async submit(pid, text) {
+    text = clean(text, 40);
+    if (!text) throw new Error('Type a name');
+    // Check the live status, not the cached copy, so a late name can't slip in
+    // after the game master has started reading.
+    const status = await fb('empire/status');
+    if (status !== 'submitting') throw new Error('Submissions are closed');
+    await fb('empire/subs/' + pid, 'PUT', text);
+  },
+};
+
+const gmActions = {
+  async open(b) { await fb('empire', 'PUT', { status: 'submitting', prize: Math.max(0, +b.prize || 10), idx: 0 }); store.del('order'); addLog('Empire is open. Submit your name!'); },
+  async read() {
+    const subs = emp().subs || {};
+    const names = Object.values(subs).filter(x => typeof x === 'string');
+    if (!names.length) throw new Error('No names yet');
+    const a = new Uint32Array(names.length); crypto.getRandomValues(a);
+    for (let i = names.length - 1; i > 0; i--) { const j = a[i] % (i + 1); [names[i], names[j]] = [names[j], names[i]]; }
+    store.set('order', JSON.stringify(names));   // only on the GM's phone
+    const marks = {}; Object.keys(subs).forEach(k => marks[k] = true);
+    await fb('empire', 'PATCH', { status: 'reading', idx: 0, total: names.length, subs: marks });
+  },
+  async next() {
+    // Read live, never the cached copy: the game master taps faster than we poll.
+    const E = (await fb('empire')) || {};
+    if (E.status !== 'reading') return;
+    const idx = (E.idx || 0) + 1;
+    if (idx >= (E.total || 0)) { store.del('order'); await fb('empire', 'PATCH', { status: 'playing', idx }); addLog('All names read. Empire is on!'); }
+    else await fb('empire', 'PATCH', { idx });
+  },
+  async winner(b) {
+    const p = await fb('players/' + b.pid); if (!p) throw new Error('Pick a player');
+    const pts = Math.max(0, +b.points || emp().prize || 0);
+    await fb('players/' + b.pid + '/points', 'PUT', (p.points || 0) + pts);
+    await fb('empire', 'PATCH', { status: 'done', winner: b.pid });
+    addLog(p.name + ' won Empire (+' + pts + ')');
+  },
+  async reset() { store.del('order'); await fb('empire', 'PUT', { status: 'idle', prize: 10, idx: 0 }); },
+  async award(b) {
+    const p = await fb('players/' + b.pid); if (!p) throw new Error('Pick a player');
+    const pts = Math.round(+b.points || 0);
+    await fb('players/' + b.pid + '/points', 'PUT', (p.points || 0) + pts);
+    addLog(p.name + ' ' + (pts >= 0 ? '+' : '') + pts + (b.label ? ' (' + clean(b.label, 30) + ')' : ''));
+  },
+  async remove(b) { await fb('players/' + b.pid, 'DELETE'); await fb('empire/subs/' + b.pid, 'DELETE'); },
+  async wipe() { store.del('order'); await fb('', 'PUT', null); },
+};
+
+function buildState() {
+  const E = emp();
+  const subs = E.subs || {};
+  const players = Object.entries(R.players || {})
+    .map(([id, p]) => ({ id, name: p.name, points: p.points || 0, submitted: !!subs[id] }))
+    .sort((a, b) => b.points - a.points || a.name.localeCompare(b.name));
+  const log = Object.values(R.log || {}).sort((a, b) => b.t - a.t).slice(0, 15);
+  const win = E.winner && R.players && R.players[E.winner];
+  return {
+    players, log,
+    empire: {
+      status: E.status || 'idle',
+      submitted: Object.keys(subs).length, total: players.length,
+      mine: me.id && typeof subs[me.id] === 'string' ? subs[me.id] : null,
+      winner: win ? win.name : null, prize: E.prize || 10,
+    },
+  };
+}
+
+async function poll() {
+  try {
+    R = (await fb('')) || {};
+    S = buildState();
+    if (me.id && !(R.players && R.players[me.id])) { me = {}; store.del('pid'); store.del('pname'); }
+    current = null;
+    if (isGM && S.empire.status === 'reading') {
+      try {
+        const order = JSON.parse(store.get('order') || '[]'); const i = emp().idx || 0;
+        if (order[i] !== undefined) current = { name: order[i], n: i + 1, of: order.length };
+      } catch (e) {}
+    }
+    if (!typing) render();
+  } catch (e) {}
+}
+
+function leaderboard() {
+  if (!S.players.length) return '<p class="sub">Nobody here yet.</p>';
+  return S.players.map((p, i) => `
+    <div class="lb"><div class="rank">${i + 1}</div><div class="nm">${esc(p.name)}${p.id === me.id ? ' <span class="pill">you</span>' : ''}</div><div class="pts">${p.points}</div></div>`).join('');
+}
+
+function render() {
+  const el = $('#app');
+  if (asking) return;
+  if (isGM && !pin) return;
+  if (!me.id && !isGM) return renderJoin(el);
+  if (!S) { el.innerHTML = '<p class="sub">Loading...</p>'; return; }
+  const tabs = isGM ? `<div class="tabs"><button class="${tab==='play'?'on':''}" onclick="setTab('play')">Play</button><button class="${tab==='gm'?'on':''}" onclick="setTab('gm')">Game master</button><button class="${tab==='board'?'on':''}" onclick="setTab('board')">Scores</button></div>` : '';
+  let html = `<div class="top"><div><h1>Game Night</h1><p class="sub">${me.name ? 'Hi ' + esc(me.name) : 'Game master'}</p></div><span class="pill">${S.players.length} here</span></div>${tabs}`;
+  if (!isGM || tab === 'play') html += renderPlay() + `<h2>Leaderboard</h2><div class="card">${leaderboard()}</div>` + renderLog();
+  else if (tab === 'gm') html += renderGM();
+  else html += `<div class="card">${leaderboard()}</div>` + renderLog();
+  el.innerHTML = html;
+}
+
+function renderLog() {
+  if (!S.log.length) return '';
+  return `<h2>Activity</h2><div class="card">${S.log.map(l => `<div class="log">${esc(l.text)}</div>`).join('')}</div>`;
+}
+
+function renderJoin(el) {
+  el.innerHTML = `
+    <h1>Game Night</h1>
+    <p class="sub">Check in to play. Use the name everyone knows you by.</p>
+    <div class="card">
+      <input id="jn" placeholder="Your name" maxlength="24" autocomplete="off" onfocus="typing=true" onblur="typing=false">
+      <button onclick="join()">Check in</button>
+      <div class="err" id="jerr"></div>
+    </div>
+    <p class="sub center"><a href="/?gm" onclick="return askPin()">I'm the game master</a></p>`;
+}
+
+async function join() {
+  const name = $('#jn').value;
+  try {
+    const r = await api.join(name);
+    me = { id: r.id, name: r.name };
+    store.set('pid', r.id); store.set('pname', r.name);
+    typing = false; poll();
+  } catch (e) { $('#jerr').textContent = e.message; }
+}
+
+function askPin() {
+  asking = true;
+  const el = $('#app');
+  el.innerHTML = `<h1>Game master</h1><p class="sub">Enter the PIN.</p><div class="card"><input id="pin" type="password" inputmode="numeric" placeholder="PIN"><button onclick="tryPin()">Unlock</button><div class="err" id="perr"></div></div>`;
+  return false;
+}
+async function tryPin() {
+  const p = $('#pin').value;
+  try {
+    if (p !== CONFIG.GM_PIN) throw new Error('bad'); pin = p;
+    store.set('gmpin', p); asking = false; isGM = true; tab = 'gm'; poll();
+  } catch (e) { pin = null; $('#perr').textContent = 'Wrong PIN'; }
+}
+function setTab(t) { tab = t; render(); }
+
+function renderPlay() {
+  const E = S.empire;
+  let inner;
+  if (E.status === 'idle') inner = `<p class="sub" style="margin:0">Waiting for the next game. Hang tight.</p>`;
+  else if (E.status === 'submitting') {
+    const mine = E.mine && E.mine !== true ? E.mine : '';
+    inner = me.id ? `
+      <p style="margin:0 0 6px"><b>Pick a name for the cup.</b> Anyone alive or fictional. Keep it secret.</p>
+      ${mine ? `<p class="tick">Locked in: ${esc(mine)}. You can change it until the GM starts reading.</p>` : ''}
+      <input id="en" placeholder="Your name for the cup" maxlength="40" autocomplete="off" onfocus="typing=true" onblur="typing=false">
+      <button onclick="submitName()">${mine ? 'Change it' : 'Submit'}</button><div class="err" id="eerr"></div>
+      <p class="sub" style="margin:0">${E.submitted} of ${E.total} in</p>` : `<p class="sub">${E.submitted} names in.</p>`;
+  }
+  else if (E.status === 'reading') inner = `<div class="big">Listen up</div><p class="sub center">The game master is reading the names. One time only.</p>`;
+  else if (E.status === 'playing') inner = `<div class="big">Empire is live</div><p class="sub center">Play it out in real life. The game master records the winner.</p>`;
+  else inner = `<div class="big">${esc(E.winner || '?')} wins</div><p class="sub center">+${E.prize} points</p>`;
+  return `<h2>Now playing: Empire</h2><div class="card">${inner}</div>`;
+}
+
+async function submitName() {
+  const text = $('#en').value;
+  try { await api.submit(me.id, text); typing = false; $('#en').blur(); poll(); }
+  catch (e) { $('#eerr').textContent = e.message; }
+}
+
+function playerOptions() {
+  return S.players.map(p => `<option value="${p.id}">${esc(p.name)} (${p.points})</option>`).join('');
+}
+
+function renderGM() {
+  const E = S.empire;
+  let h = `<h2>Empire</h2><div class="card">`;
+  if (E.status === 'idle' || E.status === 'done') {
+    h += `<label class="sub">Points for the winner</label><input id="prize" type="number" inputmode="numeric" value="${E.prize || 10}" onfocus="typing=true" onblur="typing=false"><button onclick="gm('open',{prize:+$('#prize').value})">Open a new round</button>`;
+    if (E.status === 'done') h += `<p class="sub center">Last winner: ${esc(E.winner || '')}</p>`;
+  } else if (E.status === 'submitting') {
+    h += `<p><b>${E.submitted}</b> of ${E.total} players have submitted.</p>
+      <div>${S.players.map(p => `<div class="lb"><div class="nm">${esc(p.name)}</div>${p.submitted ? '<span class="tick">in</span>' : '<span class="sub" style="margin:0">waiting</span>'}</div>`).join('')}</div>
+      <button onclick="gm('read')" ${E.submitted ? '' : 'disabled'}>Close and start reading</button>
+      <button class="alt" onclick="gm('reset')">Cancel round</button>`;
+  } else if (E.status === 'reading') {
+    h += current
+      ? `<p class="sub center">Name ${current.n} of ${current.of}. Read it out loud, then tap Next. You can't go back.</p><div class="big">${esc(current.name)}</div><button onclick="gm('next')">${current.n === current.of ? 'Finish reading' : 'Next name'}</button>`
+      : `<p class="sub center">The list of names lives on this phone only, and it isn't here. If you reloaded on a different phone or cleared your browser, the names are gone. Start the round over.</p><button class="alt" onclick="gm('reset')">Start over</button>`;
+  } else if (E.status === 'playing') {
+    h += `<p class="sub">Game is on. When it ends, pick the winner.</p>
+      <select id="win">${playerOptions()}</select>
+      <input id="wpts" type="number" inputmode="numeric" value="${E.prize}" onfocus="typing=true" onblur="typing=false">
+      <button onclick="gm('winner',{pid:$('#win').value,points:+$('#wpts').value})">Record winner</button>
+      <button class="alt" onclick="gm('reset')">Cancel round</button>`;
+  }
+  h += `</div><h2>Other games</h2><div class="card">
+      <p class="sub" style="margin:0 0 6px">Award points for anything: Imposter, trivia, food eating contest.</p>
+      <select id="ap">${playerOptions()}</select>
+      <div class="row"><input id="alabel" placeholder="Game or reason" onfocus="typing=true" onblur="typing=false"><input id="apts" type="number" inputmode="numeric" value="5" onfocus="typing=true" onblur="typing=false"></div>
+      <button onclick="gm('award',{pid:$('#ap').value,points:+$('#apts').value,label:$('#alabel').value})" ${S.players.length ? '' : 'disabled'}>Give points</button>
+    </div>
+    <h2>Players</h2><div class="card">${S.players.map(p => `<div class="lb"><div class="nm">${esc(p.name)}</div><button class="sm alt" onclick="if(confirm('Remove ${esc(p.name)}?'))gm('remove',{pid:'${p.id}'})">Remove</button></div>`).join('') || '<p class="sub">No players yet.</p>'}</div>
+    <h2>Danger zone</h2><button class="pink" onclick="if(confirm('Wipe everything?'))gm('wipe',{})">Wipe all data</button>`;
+  return h;
+}
+
+
+async function gm(path, body) {
+  try { await gmActions[path](body || {}); typing = false; await poll(); }
+  catch (e) { alert(e.message); }
+}
+
+if (!CONFIG.DB_URL) {
+  document.getElementById('app').innerHTML = '<h1>Game Night</h1><p class="sub">Setup needed: add your Firebase database URL to config.js (see README).</p>';
+} else {
+  if (!isGM && location.search.includes('gm')) askPin();
+  poll(); setInterval(poll, 1500);
+}
+</script>
+</body>
+</html>
