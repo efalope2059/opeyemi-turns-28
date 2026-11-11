@@ -2,6 +2,6 @@
 // The PIN is visible to anyone who views the page source. It keeps friends from
 // tapping GM buttons by accident, it is not real security.
 window.CONFIG = {
-  DB_URL: '',          // e.g. 'https://your-project-default-rtdb.firebaseio.com'
+  DB_URL: 'https://opeyemi-turns-28-default-rtdb.firebaseio.com',
   GM_PIN: '4242',
 };
