@@ -56,9 +56,11 @@ Game master tab.
 
 **Empire.** You open a round and set the prize. Everyone submits one secret name
 from their phone, and you can watch who has and hasn't. When you close
-submissions, the names are shuffled and your phone shows them one at a time, no
-going back. You submit a name too, so you can play. Afterwards you pick the
-winner and the points land on the leaderboard.
+submissions, the names are shuffled and your phone shows the whole list with a
+reminder to read each one out loud only once. Tap a name to cross it off as you
+go, so you don't lose your place. You submit a name too, so you can play. When
+the list is done you tap "Done reading, start the game", then tap the winner and
+the points land on the leaderboard.
 
 **Everything else.** The "Other games" box awards points to anyone for any
 reason, so Imposter, trivia and a wing-eating contest all feed the same
@@ -68,10 +70,14 @@ leaderboard without needing to be built first.
 
 - The PIN is visible in the page source. It stops friends from tapping game master
   buttons by accident; it is not real security.
-- The shuffled list of Empire names is held on the game master's phone only, and it
-  is wiped from the database the moment reading starts. That is what makes each name
-  read exactly once. If you reload on a different phone mid-round, the names are
-  gone and you start the round over.
+- Reading each name once is a rule on screen, not something the app enforces. The
+  list stays available to the game master for the whole reading phase, so a reload
+  or a switch to another phone doesn't lose it. The name text is dropped from the
+  database once you start the game.
+- During a round the submitted names do sit in the database, and the database URL
+  is in this repo. A guest who went looking could read the names before they are
+  read out. Fine for a party, but don't treat them as secret from someone
+  determined.
 - Points, players and the activity log survive a reload on any phone.
 - The page polls every 1.5 seconds. With 20 guests that is well inside Firebase's
   free tier.
@@ -84,3 +90,4 @@ leaderboard without needing to be built first.
 | --- | --- |
 | `index.html` | The whole app: styles, UI and game logic |
 | `config.js` | Your database URL and game master PIN |
+| `hero.jpg` | Photo used in the page header |

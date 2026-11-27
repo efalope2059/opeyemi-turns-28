@@ -92,6 +92,21 @@
   .tabs button:last-child { border-right:0; }
   .tabs button.on { background:var(--ink); color:#000; }
   .hide { display:none; }
+
+  /* Empire: the reading list and the tappable player picker */
+  .read-rule { border:1px solid var(--line2); border-left:3px solid var(--gold); padding:12px 14px; margin:0 0 14px; }
+  .read-rule b { color:var(--gold); }
+  .namerow { display:flex; align-items:baseline; gap:14px; padding:15px 12px; border:1px solid var(--line); margin-bottom:6px; cursor:pointer; }
+  .namerow .num { width:26px; font:500 12px/1 var(--mono); color:var(--gold); }
+  .namerow .nm { flex:1; font-weight:600; font-size:18px; min-width:0; overflow-wrap:anywhere; }
+  .namerow.read { border-color:#141414; opacity:.4; }
+  .namerow.read .nm { text-decoration:line-through; }
+  .picks { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 16px; }
+  .pick { width:auto; flex:1 1 44%; margin:0; padding:14px 12px; background:transparent; color:var(--ink); border-color:var(--line2);
+          font:600 15px/1.2 Inter,system-ui,sans-serif; letter-spacing:0; text-transform:none; }
+  .pick::after { content:none; }
+  .pick.on { background:var(--gold); color:#000; border-color:var(--gold); }
+  .pick .pts { font-family:var(--display); font-size:16px; line-height:1; opacity:.7; }
 </style>
 </head>
 <body>
@@ -118,7 +133,7 @@ let pin = store.get('gmpin');
 let isGM = !!pin && pin === CONFIG.GM_PIN && location.search.includes('gm');
 let tab = 'play';
 let S = null, R = null;
-let current = null;
+let picked = null;      // player the game master has tapped
 let asking = false;
 let typing = false;
 
@@ -154,24 +169,29 @@ const api = {
 };
 
 const gmActions = {
-  async open(b) { await fb('empire', 'PUT', { status: 'submitting', prize: Math.max(0, +b.prize || 10), idx: 0 }); store.del('order'); addLog('Empire is open. Submit your name!'); },
+  async open(b) { await fb('empire', 'PUT', { status: 'submitting', prize: Math.max(0, +b.prize || 10) }); addLog('Empire is open. Submit your name!'); },
   async read() {
-    const subs = emp().subs || {};
+    // Shuffle once and store the order, so the list reads the same on any phone
+    // the game master picks up.
+    const subs = (await fb('empire/subs')) || {};
     const names = Object.values(subs).filter(x => typeof x === 'string');
     if (!names.length) throw new Error('No names yet');
     const a = new Uint32Array(names.length); crypto.getRandomValues(a);
     for (let i = names.length - 1; i > 0; i--) { const j = a[i] % (i + 1); [names[i], names[j]] = [names[j], names[i]]; }
-    store.set('order', JSON.stringify(names));   // only on the GM's phone
-    const marks = {}; Object.keys(subs).forEach(k => marks[k] = true);
-    await fb('empire', 'PATCH', { status: 'reading', idx: 0, total: names.length, subs: marks });
+    await fb('empire', 'PATCH', { status: 'reading', order: names, marks: null });
   },
-  async next() {
-    // Read live, never the cached copy: the game master taps faster than we poll.
+  async mark(b) {
+    // Cross a name off, or put it back if it was tapped by mistake.
+    const was = await fb('empire/marks/' + b.i);
+    await fb('empire/marks/' + b.i, 'PUT', was ? null : true);
+  },
+  async played() {
     const E = (await fb('empire')) || {};
     if (E.status !== 'reading') return;
-    const idx = (E.idx || 0) + 1;
-    if (idx >= (E.total || 0)) { store.del('order'); await fb('empire', 'PATCH', { status: 'playing', idx }); addLog('All names read. Empire is on!'); }
-    else await fb('empire', 'PATCH', { idx });
+    // The names have been read aloud, so drop the text and keep only who submitted.
+    const marks = {}; Object.keys(E.subs || {}).forEach(k => marks[k] = true);
+    await fb('empire', 'PATCH', { status: 'playing', subs: marks, order: null, marks: null });
+    addLog('All names read. Empire is on!');
   },
   async winner(b) {
     const p = await fb('players/' + b.pid); if (!p) throw new Error('Pick a player');
@@ -180,7 +200,7 @@ const gmActions = {
     await fb('empire', 'PATCH', { status: 'done', winner: b.pid });
     addLog(p.name + ' won Empire (+' + pts + ')');
   },
-  async reset() { store.del('order'); await fb('empire', 'PUT', { status: 'idle', prize: 10, idx: 0 }); },
+  async reset() { await fb('empire', 'PUT', { status: 'idle', prize: 10 }); },
   async award(b) {
     const p = await fb('players/' + b.pid); if (!p) throw new Error('Pick a player');
     const pts = Math.round(+b.points || 0);
@@ -188,7 +208,7 @@ const gmActions = {
     addLog(p.name + ' ' + (pts >= 0 ? '+' : '') + pts + (b.label ? ' (' + clean(b.label, 30) + ')' : ''));
   },
   async remove(b) { await fb('players/' + b.pid, 'DELETE'); await fb('empire/subs/' + b.pid, 'DELETE'); },
-  async wipe() { store.del('order'); await fb('', 'PUT', null); },
+  async wipe() { picked = null; await fb('', 'PUT', null); },
 };
 
 function buildState() {
@@ -206,6 +226,7 @@ function buildState() {
       submitted: Object.keys(subs).length, total: players.length,
       mine: me.id && typeof subs[me.id] === 'string' ? subs[me.id] : null,
       winner: win ? win.name : null, prize: E.prize || 10,
+      order: Array.isArray(E.order) ? E.order : [], marks: E.marks || {},
     },
   };
 }
@@ -215,13 +236,8 @@ async function poll() {
     R = (await fb('')) || {};
     S = buildState();
     if (me.id && !(R.players && R.players[me.id])) { me = {}; store.del('pid'); store.del('pname'); }
-    current = null;
-    if (isGM && S.empire.status === 'reading') {
-      try {
-        const order = JSON.parse(store.get('order') || '[]'); const i = emp().idx || 0;
-        if (order[i] !== undefined) current = { name: order[i], n: i + 1, of: order.length };
-      } catch (e) {}
-    }
+    // Forget a tapped player who has since left.
+    if (picked && !(R.players && R.players[picked])) picked = null;
     if (!typing) render();
   } catch (e) {}
 }
@@ -327,9 +343,21 @@ async function submitName() {
   catch (e) { $('#eerr').textContent = e.message; }
 }
 
-function playerOptions() {
-  return S.players.map(p => `<option value="${p.id}">${esc(p.name)} (${p.points})</option>`).join('');
+function nameOf(pid) {
+  const p = S.players.find(x => x.id === pid);
+  return p ? p.name : '';
 }
+
+// Tappable list instead of a dropdown. A dropdown lost its selection every time
+// the page refreshed, which made picking a winner impossible.
+function pickList() {
+  if (!S.players.length) return '<p class="sub">No players yet.</p>';
+  return '<div class="picks">' + S.players.map(p =>
+    `<button class="pick ${picked === p.id ? 'on' : ''}" onclick="pick('${p.id}')">${esc(p.name)} <span class="pts">${p.points}</span></button>`
+  ).join('') + '</div>';
+}
+
+function pick(pid) { picked = picked === pid ? null : pid; render(); }
 
 function renderGM() {
   const E = S.empire;
@@ -343,21 +371,25 @@ function renderGM() {
       <button onclick="gm('read')" ${E.submitted ? '' : 'disabled'}>Close and start reading</button>
       <button class="alt" onclick="gm('reset')">Cancel round</button>`;
   } else if (E.status === 'reading') {
-    h += current
-      ? `<p class="sub center">Name ${current.n} of ${current.of}. Read it out loud, then tap Next. You can't go back.</p><div class="big">${esc(current.name)}</div><button onclick="gm('next')">${current.n === current.of ? 'Finish reading' : 'Next name'}</button>`
-      : `<p class="sub center">The list of names lives on this phone only, and it isn't here. If you reloaded on a different phone or cleared your browser, the names are gone. Start the round over.</p><button class="alt" onclick="gm('reset')">Start over</button>`;
+    const done = Object.keys(E.marks).length;
+    h += `<p class="read-rule">Read each name out loud <b>once only</b>. Don't repeat one, even if someone asks.</p>
+      <p class="sub">Tap a name to cross it off. ${done} of ${E.order.length} read.</p>
+      <div>${E.order.map((n, i) => `<div class="namerow ${E.marks[i] ? 'read' : ''}" onclick="gm('mark',{i:${i}})"><span class="num">${String(i + 1).padStart(2, '0')}</span><span class="nm">${esc(n)}</span><span class="tick">${E.marks[i] ? 'read' : ''}</span></div>`).join('')}</div>
+      <button onclick="gm('played')">Done reading, start the game</button>
+      <button class="alt" onclick="gm('reset')">Cancel round</button>`;
   } else if (E.status === 'playing') {
     h += `<p class="sub">Game is on. When it ends, pick the winner.</p>
-      <select id="win">${playerOptions()}</select>
+      ${pickList()}
+      <label class="sub">Points</label>
       <input id="wpts" type="number" inputmode="numeric" value="${E.prize}" onfocus="typing=true" onblur="typing=false">
-      <button onclick="gm('winner',{pid:$('#win').value,points:+$('#wpts').value})">Record winner</button>
+      <button onclick="gm('winner',{pid:picked,points:+$('#wpts').value})" ${picked ? '' : 'disabled'}>${picked ? 'Record ' + esc(nameOf(picked)) + ' as winner' : 'Tap the winner above'}</button>
       <button class="alt" onclick="gm('reset')">Cancel round</button>`;
   }
   h += `</div><h2>Other games</h2><div class="card">
       <p class="sub" style="margin:0 0 6px">Award points for anything: Imposter, trivia, food eating contest.</p>
-      <select id="ap">${playerOptions()}</select>
+      ${pickList()}
       <div class="row"><input id="alabel" placeholder="Game or reason" onfocus="typing=true" onblur="typing=false"><input id="apts" type="number" inputmode="numeric" value="5" onfocus="typing=true" onblur="typing=false"></div>
-      <button onclick="gm('award',{pid:$('#ap').value,points:+$('#apts').value,label:$('#alabel').value})" ${S.players.length ? '' : 'disabled'}>Give points</button>
+      <button onclick="gm('award',{pid:picked,points:+$('#apts').value,label:$('#alabel').value})" ${picked ? '' : 'disabled'}>${picked ? 'Give points to ' + esc(nameOf(picked)) : 'Tap a player above'}</button>
     </div>
     <h2>Players</h2><div class="card">${S.players.map(p => `<div class="lb"><div class="nm">${esc(p.name)}</div><button class="sm alt" onclick="if(confirm('Remove ${esc(p.name)}?'))gm('remove',{pid:'${p.id}'})">Remove</button></div>`).join('') || '<p class="sub">No players yet.</p>'}</div>
     <h2>Danger zone</h2><button class="pink" onclick="if(confirm('Wipe everything?'))gm('wipe',{})">Wipe all data</button>`;
@@ -366,8 +398,12 @@ function renderGM() {
 
 
 async function gm(path, body) {
-  try { await gmActions[path](body || {}); typing = false; await poll(); }
-  catch (e) { alert(e.message); }
+  try {
+    await gmActions[path](body || {});
+    if (path === 'winner' || path === 'award') picked = null;
+    typing = false;
+    await poll();
+  } catch (e) { alert(e.message); }
 }
 
 if (!CONFIG.DB_URL) {
